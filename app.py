@@ -40,18 +40,25 @@ layout = st.radio(
     index=0,
 )
 
-# ---- Page / grid geometry (Letter, 1" margins -> 6.5in usable width) ----
-PAGE_USABLE_WIDTH_IN = 6.5
-CONTENT_HEIGHT_BUDGET_IN = 7.3  # both rows + captions must fit even on the
-                                 # heading page; leaves headroom for title/intro
+# ---- Page / grid geometry ----
+# Narrow margins to reclaim page real-estate for the photos themselves.
+PAGE_MARGIN_IN = 0.4
+PAGE_W_IN, PAGE_H_IN = 8.5, 11.0  # Letter
+PAGE_USABLE_WIDTH_IN = PAGE_W_IN - 2 * PAGE_MARGIN_IN
+PAGE_USABLE_HEIGHT_IN = PAGE_H_IN - 2 * PAGE_MARGIN_IN
+
 GRID_COLS = 2
 GRID_ROWS = 2
-CELL_PADDING_IN = 0.15  # room for cell margins so images don't touch borders
-CAPTION_ALLOWANCE_IN = 0.3  # per row, for the caption line + spacing
+CELL_PADDING_IN = 0.06  # tiny gutter so photos don't touch each other/edges
+CAPTION_ALLOWANCE_IN = 0.32  # per row: caption line + line-height slack around images
+
 GRID_CELL_MAX_W_IN = PAGE_USABLE_WIDTH_IN / GRID_COLS - CELL_PADDING_IN
-GRID_CELL_MAX_H_IN = CONTENT_HEIGHT_BUDGET_IN / GRID_ROWS - CAPTION_ALLOWANCE_IN
+# The grid pages get a page break of their own (see build_docx), so every
+# grid page has the FULL page height to work with — not just what's left
+# after the title. That's what lets the photos be as large as possible.
+GRID_CELL_MAX_H_IN = PAGE_USABLE_HEIGHT_IN / GRID_ROWS - CAPTION_ALLOWANCE_IN
 SINGLE_MAX_W_IN = PAGE_USABLE_WIDTH_IN
-SINGLE_MAX_H_IN = 8.0
+SINGLE_MAX_H_IN = PAGE_USABLE_HEIGHT_IN - CAPTION_ALLOWANCE_IN
 
 
 def resized_image_stream(uploaded_file, max_width_in, max_height_in, dpi=150):
@@ -91,6 +98,26 @@ def resized_image_stream(uploaded_file, max_width_in, max_height_in, dpi=150):
     return buf, width_in, height_in
 
 
+def _set_narrow_margins(doc):
+    for section in doc.sections:
+        section.top_margin = Inches(PAGE_MARGIN_IN)
+        section.bottom_margin = Inches(PAGE_MARGIN_IN)
+        section.left_margin = Inches(PAGE_MARGIN_IN)
+        section.right_margin = Inches(PAGE_MARGIN_IN)
+
+
+def _shrink_table_cell_margins(table, margin_in=0.03):
+    """Cut the default (fairly generous) cell padding down to a sliver, so
+    the table's own spacing doesn't eat into the space available for images."""
+    twips = str(int(margin_in * 1440))
+    tbl_pr = table._tbl.tblPr
+    cell_mar = tbl_pr.makeelement(qn("w:tblCellMar"), {})
+    for edge in ("top", "left", "bottom", "right"):
+        el = cell_mar.makeelement(qn(f"w:{edge}"), {qn("w:w"): twips, qn("w:type"): "dxa"})
+        cell_mar.append(el)
+    tbl_pr.append(cell_mar)
+
+
 def _prevent_row_split(row):
     """Force a table row to stay together on one page (no splitting a row's
     image from its caption across a page boundary)."""
@@ -112,17 +139,20 @@ def _strip_table_borders(table):
 def _add_image_to_cell(cell, img_stream, width_in, height_in, caption):
     paragraph = cell.paragraphs[0]
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_after = Pt(2)
     run = paragraph.add_run()
     run.add_picture(img_stream, width=Inches(width_in), height=Inches(height_in))
     if caption:
         cap = cell.add_paragraph(caption)
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cap.paragraph_format.space_after = Pt(0)
         cap.runs[0].italic = True
         cap.runs[0].font.size = Pt(9)
 
 
 def build_docx(title, intro, files, captions, grid_layout=True):
     doc = Document()
+    _set_narrow_margins(doc)
 
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
@@ -130,9 +160,11 @@ def build_docx(title, intro, files, captions, grid_layout=True):
 
     heading = doc.add_heading(title, level=1)
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    heading.paragraph_format.space_after = Pt(4)
 
     if intro.strip():
-        doc.add_paragraph(intro.strip())
+        intro_para = doc.add_paragraph(intro.strip())
+        intro_para.paragraph_format.space_after = Pt(4)
 
     items = list(zip(files, captions))
 
@@ -163,6 +195,7 @@ def build_docx(title, intro, files, captions, grid_layout=True):
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = True
         _strip_table_borders(table)
+        _shrink_table_cell_margins(table)
         for row in table.rows:
             _prevent_row_split(row)
 
@@ -173,9 +206,11 @@ def build_docx(title, intro, files, captions, grid_layout=True):
             img_stream, w, h = resized_image_stream(f, GRID_CELL_MAX_W_IN, GRID_CELL_MAX_H_IN)
             _add_image_to_cell(cell, img_stream, w, h, caption)
 
-        # Page break between groups (not after the last one).
-        if group_index < len(groups) - 1:
-            doc.add_page_break()
+        # Every grid page (including the first) starts fresh, via a
+        # page-break-before flag on the table's own first paragraph rather
+        # than a separate spacer paragraph — that way no extra whitespace
+        # is spent, so the grid gets the full page height to work with.
+        table.rows[0].cells[0].paragraphs[0].paragraph_format.page_break_before = True
 
     out = io.BytesIO()
     doc.save(out)
