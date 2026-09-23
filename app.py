@@ -6,7 +6,7 @@ Deploy:        push to GitHub -> connect repo at share.streamlit.io
 """
 
 import io
-from PIL import Image
+from PIL import Image, ImageOps
 import streamlit as st
 from docx import Document
 from docx.shared import Inches, Pt
@@ -41,7 +41,13 @@ def resized_image_stream(uploaded_file, max_width_in=TARGET_WIDTH_IN, dpi=150):
     (keeps the docx file size sane), and return (BytesIO, width_in, height_in)
     with the correct aspect ratio preserved.
     """
-    img = Image.open(uploaded_file).convert("RGB")
+    img = Image.open(uploaded_file)
+    # Phone photos store rotation as an EXIF tag rather than rotating the
+    # actual pixels. Bake that rotation into the pixels now, BEFORE we
+    # read width/height or resize — otherwise portrait photos end up
+    # embedded sideways.
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
     w_px, h_px = img.size
     aspect = h_px / w_px
 
